@@ -1,0 +1,16 @@
+[vendor]
+name = "Audio Ease / antiorp / nagualcode"
+id = "com.audioease"
+url = "https://github.com/nagualcode/th0nk3000"
+au_manufacturer = "ThNk"
+
+[[plugin]]
+name = "Th0nk"
+bundle_id = "thonk"
+crate = "thonk"
+category = "effect"
+fourcc = "ThNk"
+au3_subtype = "ThN3"
+au_tag = "Granular"
+vst3_subcategory = "Granular"
+au3_name = "Th0nk (AUv3)"

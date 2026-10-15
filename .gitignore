@@ -1,0 +1,6 @@
+target/
+*.DS_Store
+*.wav
+*.aif
+*.aiff
+Cargo.lock
