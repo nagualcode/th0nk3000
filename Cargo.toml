@@ -5,7 +5,7 @@ version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/nagualcode/th0nk3000"
-authors = ["nagualcode", "Arjen van der Schoot", "=cw4t7abs (antiorp)"]
+authors = ["Jardim Sonoro", "nagualcode", "Arjen van der Schoot", "=cw4t7abs (antiorp)"]
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]

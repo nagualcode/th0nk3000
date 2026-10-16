@@ -1,8 +1,8 @@
 [vendor]
-name = "Audio Ease / antiorp / nagualcode"
-id = "com.audioease"
+name = "Jardim Sonoro"
+id = "com.jardimsonoro"
 url = "https://github.com/nagualcode/th0nk3000"
-au_manufacturer = "ThNk"
+au_manufacturer = "JdSn"
 
 [[plugin]]
 name = "Th0nk"
