@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon-1024.png" width="160" alt="th0nk3000 icon"></p>
+
 # th0nk3000
 
 ```
@@ -287,6 +289,7 @@ th0nk3000/
 │   ├── main.rs             # standalone app
 │   └── bin/thonk_render.rs # command-line renderer
 ├── docs/                   # screenshots
+├── assets/                 # app icon (source PNG, 1024 px PNG, .icns)
 ├── reverse_engineering/
 │   ├── README.md           # how the binary was taken apart
 │   ├── thOnk_0+2.c         # Ghidra decompilation
