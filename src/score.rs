@@ -118,7 +118,13 @@ impl MacRandom {
 
     /// `Random()`: uniformly distributed in -32767..=32767.
     pub fn random(&mut self) -> i16 {
-        self.seed = ((self.seed as u64 * 16807) % 0x7fff_ffff) as u32;
+        // seed * 16807 mod (2^31 - 1), reduced without a division.
+        let x = self.seed as u64 * 16807;
+        let mut y = (x & 0x7fff_ffff) + (x >> 31);
+        if y >= 0x7fff_ffff {
+            y -= 0x7fff_ffff;
+        }
+        self.seed = y as u32;
         let r = self.seed as u16 as i16;
         if r == i16::MIN { 0 } else { r }
     }
@@ -1040,11 +1046,50 @@ mod tests {
     }
 
     #[test]
+    fn mersenne_reduction_equals_modulo() {
+        let mut r = MacRandom::new(0x1234_5678);
+        let mut seed = 0x1234_5678u64;
+        for _ in 0..1_000_000 {
+            seed = seed * 16807 % 0x7fff_ffff;
+            r.random();
+            assert_eq!(r.seed as u64, seed);
+        }
+    }
+
+    #[test]
     fn mac_random_matches_park_miller() {
         let mut r = MacRandom::new(1);
         assert_eq!(r.random(), 16807);
         assert_eq!(r.seed, 16807);
         r.random();
         assert_eq!(r.seed, 282_475_249);
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn gen_cost() {
+        let mut s = ScoreState::new();
+        for t in [ScoreType::Flash, ScoreType::ClassicHectic] {
+            let t0 = std::time::Instant::now();
+            for i in 0..50 {
+                s.regenerate(t, 4.0, i);
+            }
+            let mut r = MacRandom::new(3);
+            let t1 = std::time::Instant::now();
+            let mut acc = 0.0;
+            for _ in 0..100_000 {
+                acc += r.frand();
+            }
+            println!(
+                "{:?}: {:.0} us/regenerate, frand {:.1} ns ({acc:.0})",
+                t,
+                t0.elapsed().as_secs_f64() * 1e6 / 50.0,
+                t1.elapsed().as_secs_f64() * 1e9 / 100_000.0
+            );
+        }
     }
 }

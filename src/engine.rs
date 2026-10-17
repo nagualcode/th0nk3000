@@ -88,6 +88,10 @@ pub struct GranularEngine {
     max_end: i64,
     env: Envelopes,
 
+    /// Fractional scheduler steps this block may take: work is spread evenly over
+    /// blocks instead of bursting when the look-ahead refills.
+    step_credit: f64,
+
     active: Vec<(i64, i64)>,
     pub active_grain_count: usize,
     pub auto_restart: bool,
@@ -119,9 +123,10 @@ impl GranularEngine {
             ring_l: vec![0; RING_LEN],
             ring_r: vec![0; RING_LEN],
             read_pos: 0.0,
-            cleared_to: 0,
+            cleared_to: -4,
             max_end: 0,
             env: Envelopes::new(),
+            step_credit: 0.0,
             active: Vec::with_capacity(16384),
             active_grain_count: 0,
             auto_restart: true,
@@ -187,13 +192,19 @@ impl GranularEngine {
         self.score.regenerate(score_type, dur, seed);
         // The engine keeps drawing from the generator the score left off with.
         self.rng = MacRandom::new(seed ^ 0x5468_4f6e);
-        self.ring_l.fill(0);
-        self.ring_r.fill(0);
+        // Only the part already mixed ahead of playback needs silencing; the rest
+        // of the ring is zero (cleared behind the read head), so a new Thonk costs
+        // ~1 s of memory traffic instead of the whole 8 MB ring.
+        let from = self.read_pos as i64;
+        for j in from..self.max_end.max(from) {
+            let i = (j & RING_MASK) as usize;
+            self.ring_l[i] = 0;
+            self.ring_r[i] = 0;
+        }
         self.active.clear();
-        self.read_pos = 0.0;
-        self.cleared_to = -4;
-        self.max_end = 0;
-        self.base = 0;
+        self.step_credit = 0.0;
+        self.max_end = from;
+        self.base = if from == 0 { 0 } else { from + 3 };
         self.start_composition();
     }
 
@@ -456,8 +467,13 @@ impl GranularEngine {
         let ratio = sr / self.host_sr;
         let block = n as f64 * ratio;
         let step_samples = (sr * STEP_SECS).max(1.0);
-        let budget = (block / step_samples).ceil() as usize * 2 + 2;
+        // 25 % faster than real time until the look-ahead is full, never in bursts.
+        self.step_credit = (self.step_credit + block / step_samples * 1.25).min(4.0);
+        let budget = self.step_credit.floor() as usize;
+        let before = self.sched_t;
         self.schedule(self.read_pos + block + LOOKAHEAD_SECS * sr, budget);
+        let taken = ((self.sched_t - before) / STEP_SECS).round();
+        self.step_credit -= taken.min(self.step_credit.floor());
 
         let gain = 10.0f32.powf(gain_db / 20.0);
         let exact = (ratio - 1.0).abs() < 1e-12;
@@ -650,5 +666,54 @@ mod tests {
             acc
         };
         assert_eq!(run(), run());
+    }
+
+    /// Worst-case block times. Run with:
+    /// `cargo test --release --lib rt_budget -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn rt_budget() {
+        use std::time::Instant;
+        let sr = 48000.0;
+        let block = 128usize;
+        let budget_us = block as f64 / sr * 1e6;
+        let mut l = vec![0.0f32; block];
+        let mut r = vec![0.0f32; block];
+        for score in [
+            ScoreType::ClassicHectic,
+            ScoreType::Flash,
+            ScoreType::Pentathon,
+            ScoreType::Shepard,
+            ScoreType::PlainStretch1Min,
+        ] {
+            let mut e = GranularEngine::new(sr);
+            let t0 = Instant::now();
+            e.trigger(score, Some(99));
+            let trig = t0.elapsed().as_secs_f64() * 1e6;
+            let mut worst = 0.0f64;
+            let mut total = 0.0f64;
+            let mut over = 0usize;
+            let blocks = (sr as usize * 60) / block;
+            for _ in 0..blocks {
+                let t = Instant::now();
+                e.process_block(&mut l, &mut r, true, 1.0, 0.0);
+                let us = t.elapsed().as_secs_f64() * 1e6;
+                worst = worst.max(us);
+                total += us;
+                if us > budget_us * 0.5 {
+                    over += 1;
+                }
+            }
+            println!(
+                "{:<24} trigger {:7.0} us | block avg {:6.1} us ({:4.1}% CPU) worst {:7.0} us, {} blocks > 50% (budget {:.0} us)",
+                score.name(),
+                trig,
+                total / blocks as f64,
+                total / blocks as f64 / budget_us * 100.0,
+                worst,
+                over,
+                budget_us
+            );
+        }
     }
 }
