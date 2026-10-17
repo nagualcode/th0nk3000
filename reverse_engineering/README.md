@@ -252,12 +252,16 @@ data section (offset ~`0x910`), together with the menu names
 
 | Original | th0nk3000 | Why |
 |---|---|---|
-| Offline, to disk only | Real-time audition plus offline render | the point of a plugin |
-| Seed = clock | Seed = clock by default, optional locked seed | DAW recall |
-| Stops after one score | Audition chains a new composition | continuous playback |
-| Grain placement can go back in time freely | Up to 1 s back is exact; beyond that, re-anchored to "now" | a stream cannot rewrite the past (offline renders use the same rule, and it almost never triggers) |
+| Offline, to disk only | Real-time playback plus offline render | the point of a plugin |
+| Seed = clock | Seed = clock by default; optional locked seed | DAW recall |
+| One length per score | Length modes: Original (default), Stretch (time-scale every breakpoint), Cut (stop early) | lets a score fit a piece; Original keeps the authentic ending |
+| Runs from t = 0 | Seek / host sync: playback can start anywhere. The scheduler restarts at the step grid, with grain randomness reseeded from (seed, position) | repeatable DAW bounces |
+| Stops after one score | Unsynced audition chains a new composition | continuous playback |
+| Grain placement can go back in time freely | Up to 1 s back is exact; beyond that it is re-anchored to "now" | a stream cannot rewrite the past (it almost never happens) |
+| Density valleys can leave minutes of silence | Optional "Skip silences": the grain clock never jumps more than 0.5 s, and empty score steps are skipped | usability; off by default |
 | 16-bit mono AIFF input | WAV/AIFF, 8/16/24/32-bit, any channel count (mixed to mono, quantised to 16 bits) | convenience; the synthesis still sees 16-bit samples |
-| Output only wraps | Optional "clean" mode (no wrap, tanh soft clip), density and output gain | modern options; the defaults (wrap on, 100 %, 0 dB) are the original |
+| 16-bit AIFF output | 16-bit (bit-exact), 24-bit or 32-bit float, WAV or AIFF/AIFC, optional normalisation | modern delivery |
+| Output only wraps | Optional clean mode (no wrap, tanh soft clip), density and output gain | modern options; the defaults (wrap on, 100 %, 0 dB) are the original |
 | — | Live-input mode (granulates the last 5 s of input) | new |
 
 ## 10. Reproducing

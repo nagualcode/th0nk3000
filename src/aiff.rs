@@ -5,14 +5,14 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// Loaded audio buffer containing 32-bit floating point samples normalized to [-1.0, 1.0].
-#[derive(Clone)]
+/// A source sound, mixed to mono and held as 16-bit PCM: thOnk_0+2 only ever
+/// read 16-bit mono AIFF, and the synthesis works on 16-bit samples.
+#[derive(Clone, Default)]
 pub struct AudioBufferData {
     pub name: String,
+    /// Where it was loaded from (empty for the demo sound).
+    pub path: String,
     pub sample_rate: f64,
-    pub channels: usize,
-    pub samples: Vec<f32>, // Mono or mixed down to mono for granular processing
-    /// The same material as 16-bit PCM: thOnk_0+2 only ever read 16-bit mono AIFF.
     pub pcm16: Vec<i16>,
 }
 
@@ -24,23 +24,32 @@ impl AudioBufferData {
             .collect();
         Self {
             name,
+            path: String::new(),
             sample_rate,
-            channels: 1,
-            samples,
             pcm16,
         }
     }
 
-    /// Creates a default built-in synthetic test sound (rich harmonic chime/burst).
-    pub fn default_chime(sample_rate: f64) -> Self {
-        let duration_secs = 2.5;
-        let total_samples = (sample_rate * duration_secs) as usize;
-        let mut samples = Vec::with_capacity(total_samples);
+    pub fn duration_secs(&self) -> f64 {
+        if self.sample_rate > 0.0 {
+            self.pcm16.len() as f64 / self.sample_rate
+        } else {
+            0.0
+        }
+    }
 
+    pub fn is_empty(&self) -> bool {
+        self.pcm16.is_empty()
+    }
+
+    /// The built-in demo sound: a 2.5 s metallic FM burst with several transitions.
+    pub fn demo() -> Self {
+        let sample_rate = 44100.0;
+        let total_samples = (sample_rate * 2.5) as usize;
+        let mut samples = Vec::with_capacity(total_samples);
         for i in 0..total_samples {
             let t = i as f64 / sample_rate;
             let decay = (-t * 2.2).exp();
-            // Complex metallic FM chime with multiple transitions
             let f0 = 220.0 + (t * 40.0).sin() * 30.0;
             let mod_sig = (t * 330.0 * std::f64::consts::TAU).sin() * 2.5;
             let sig = (t * (f0 + mod_sig * 110.0) * std::f64::consts::TAU).sin() * 0.4
@@ -49,8 +58,7 @@ impl AudioBufferData {
                 + (t * 1760.0 * 0.7 * std::f64::consts::TAU).sin() * 0.1;
             samples.push((sig * decay) as f32);
         }
-
-        Self::new("Default Antiorp Metallic Burst".to_string(), sample_rate, samples)
+        Self::new("Demo: metallic burst".to_string(), sample_rate, samples)
     }
 
     /// Loads an audio file (WAV or AIFF) from disk.
@@ -67,15 +75,20 @@ impl AudioBufferData {
             .unwrap_or("Audio")
             .to_string();
 
-        if ext == "wav" {
+        let mut data = if ext == "wav" {
             Self::load_wav(path, filename)
-        } else if ext == "aif" || ext == "aiff" {
+        } else if ext == "aif" || ext == "aiff" || ext == "aifc" {
             Self::load_aiff(path, filename)
         } else {
             // Try WAV first, then AIFF
             Self::load_wav(path, filename.clone())
                 .or_else(|_| Self::load_aiff(path, filename))
+        }?;
+        if data.pcm16.is_empty() {
+            return Err("The file contains no audio".to_string());
         }
+        data.path = path.to_string_lossy().into_owned();
+        Ok(data)
     }
 
     fn load_wav(path: &Path, name: String) -> Result<Self, String> {
@@ -262,104 +275,188 @@ fn decode_extended_80(bytes: &[u8; 10]) -> f64 {
     if sign { -value } else { value }
 }
 
-/// Streaming 16-bit stereo writer: AIFF when the path ends in .aif/.aiff
-/// (big-endian, 80-bit extended sample rate, as thOnk_0+2 wrote), WAV otherwise.
-pub enum Pcm16Writer {
+/// Sample format of rendered files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExportFormat {
+    /// 16-bit integer, what thOnk_0+2 wrote. Exact in wrap mode at 0 dB.
+    #[default]
+    Int16,
+    Int24,
+    Float32,
+}
+
+impl ExportFormat {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Int24,
+            2 => Self::Float32,
+            _ => Self::Int16,
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Int16 => 0,
+            Self::Int24 => 1,
+            Self::Float32 => 2,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Int16 => "16-bit",
+            Self::Int24 => "24-bit",
+            Self::Float32 => "32-bit float",
+        }
+    }
+
+    fn bits(self) -> u16 {
+        match self {
+            Self::Int16 => 16,
+            Self::Int24 => 24,
+            Self::Float32 => 32,
+        }
+    }
+}
+
+/// Streaming stereo writer: AIFF (AIFC for float) when the path ends in
+/// .aif/.aiff, WAV otherwise. Takes interleaved f32 frames on the
+/// `i16 / 32768` scale, so 16-bit sums round-trip exactly.
+pub struct AudioWriter {
+    format: ExportFormat,
+    kind: WriterKind,
+}
+
+enum WriterKind {
     Wav(hound::WavWriter<std::io::BufWriter<File>>),
     Aiff {
         out: std::io::BufWriter<File>,
         sample_rate: f64,
         frames: u32,
+        buf: Vec<u8>,
     },
 }
 
-impl Pcm16Writer {
-    pub fn create(path: &Path, sample_rate: f64) -> Result<Self, String> {
+impl AudioWriter {
+    pub fn create(path: &Path, sample_rate: f64, format: ExportFormat) -> Result<Self, String> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if ext == "aif" || ext == "aiff" {
+        let kind = if ext == "aif" || ext == "aiff" || ext == "aifc" {
             let file = File::create(path).map_err(|e| e.to_string())?;
-            let mut w = Self::Aiff {
+            WriterKind::Aiff {
                 out: std::io::BufWriter::new(file),
                 sample_rate,
                 frames: 0,
-            };
-            w.write_aiff_header()?;
-            Ok(w)
+                buf: Vec::new(),
+            }
         } else {
             let spec = hound::WavSpec {
                 channels: 2,
                 sample_rate: sample_rate.round() as u32,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
+                bits_per_sample: format.bits(),
+                sample_format: if format == ExportFormat::Float32 {
+                    hound::SampleFormat::Float
+                } else {
+                    hound::SampleFormat::Int
+                },
             };
-            hound::WavWriter::create(path, spec)
-                .map(Self::Wav)
-                .map_err(|e| e.to_string())
-        }
+            WriterKind::Wav(hound::WavWriter::create(path, spec).map_err(|e| e.to_string())?)
+        };
+        let mut w = Self { format, kind };
+        w.write_aiff_header()?;
+        Ok(w)
     }
 
     /// Writes interleaved L/R frames.
-    pub fn write_frames(&mut self, interleaved: &[i16]) -> Result<(), String> {
+    pub fn write_frames(&mut self, interleaved: &[f32]) -> Result<(), String> {
         use std::io::Write;
-        match self {
-            Self::Wav(w) => {
-                let mut w16 = w.get_i16_writer(interleaved.len() as u32);
-                for &s in interleaved {
-                    w16.write_sample(s);
-                }
-                w16.flush().map_err(|e| e.to_string())
-            }
-            Self::Aiff { out, frames, .. } => {
-                let mut buf = Vec::with_capacity(interleaved.len() * 2);
-                for &s in interleaved {
-                    buf.extend_from_slice(&s.to_be_bytes());
-                }
-                *frames += (interleaved.len() / 2) as u32;
-                out.write_all(&buf).map_err(|e| e.to_string())
-            }
-        }
-    }
-
-    pub fn finalize(self) -> Result<(), String> {
-        use std::io::Write;
-        match self {
-            Self::Wav(w) => w.finalize().map_err(|e| e.to_string()),
-            mut aiff @ Self::Aiff { .. } => {
-                aiff.write_aiff_header()?;
-                if let Self::Aiff { mut out, .. } = aiff {
-                    out.flush().map_err(|e| e.to_string())?;
+        let format = self.format;
+        match &mut self.kind {
+            WriterKind::Wav(w) => {
+                for &x in interleaved {
+                    match format {
+                        ExportFormat::Int16 => w.write_sample(to_int(x, 32768.0) as i16),
+                        ExportFormat::Int24 => w.write_sample(to_int(x, 8_388_608.0)),
+                        ExportFormat::Float32 => w.write_sample(x),
+                    }
+                    .map_err(|e| e.to_string())?;
                 }
                 Ok(())
             }
+            WriterKind::Aiff {
+                out, frames, buf, ..
+            } => {
+                buf.clear();
+                for &x in interleaved {
+                    match format {
+                        ExportFormat::Int16 => {
+                            buf.extend_from_slice(&(to_int(x, 32768.0) as i16).to_be_bytes())
+                        }
+                        ExportFormat::Int24 => {
+                            buf.extend_from_slice(&to_int(x, 8_388_608.0).to_be_bytes()[1..])
+                        }
+                        ExportFormat::Float32 => buf.extend_from_slice(&x.to_be_bytes()),
+                    }
+                }
+                *frames += (interleaved.len() / 2) as u32;
+                out.write_all(buf).map_err(|e| e.to_string())
+            }
         }
     }
 
-    /// (Re)writes FORM/COMM/SSND headers at the start of the file.
+    pub fn finalize(mut self) -> Result<(), String> {
+        use std::io::Write;
+        self.write_aiff_header()?;
+        match self.kind {
+            WriterKind::Wav(w) => w.finalize().map_err(|e| e.to_string()),
+            WriterKind::Aiff { mut out, .. } => out.flush().map_err(|e| e.to_string()),
+        }
+    }
+
+    /// (Re)writes FORM/COMM/SSND headers at the start of an AIFF file.
     fn write_aiff_header(&mut self) -> Result<(), String> {
         use std::io::Write;
-        let Self::Aiff {
+        let format = self.format;
+        let WriterKind::Aiff {
             out,
             sample_rate,
             frames,
-        } = self
+            ..
+        } = &mut self.kind
         else {
             return Ok(());
         };
-        let data_bytes = *frames * 4;
-        let mut h = Vec::with_capacity(54);
+        let float = format == ExportFormat::Float32;
+        let bytes_per_frame = 2 * (format.bits() as u32 / 8);
+        let data_bytes = *frames * bytes_per_frame;
+        // AIFC adds an FVER chunk and a compression type + name to COMM.
+        let comm_len: u32 = if float { 18 + 4 + 14 } else { 18 };
+        let fver_len: u32 = if float { 12 } else { 0 };
+        let mut h = Vec::with_capacity(80);
         h.extend_from_slice(b"FORM");
-        h.extend_from_slice(&(4 + 26 + 16 + data_bytes).to_be_bytes());
-        h.extend_from_slice(b"AIFF");
+        h.extend_from_slice(&(4 + fver_len + 8 + comm_len + 16 + data_bytes).to_be_bytes());
+        h.extend_from_slice(if float { b"AIFC" } else { b"AIFF" });
+        if float {
+            h.extend_from_slice(b"FVER");
+            h.extend_from_slice(&4u32.to_be_bytes());
+            h.extend_from_slice(&0xA280_5140u32.to_be_bytes());
+        }
         h.extend_from_slice(b"COMM");
-        h.extend_from_slice(&18u32.to_be_bytes());
+        h.extend_from_slice(&comm_len.to_be_bytes());
         h.extend_from_slice(&2u16.to_be_bytes());
         h.extend_from_slice(&frames.to_be_bytes());
-        h.extend_from_slice(&16u16.to_be_bytes());
+        h.extend_from_slice(&format.bits().to_be_bytes());
         h.extend_from_slice(&encode_extended_80(*sample_rate));
+        if float {
+            h.extend_from_slice(b"fl32");
+            // Pascal string "32-bit float", padded to an even length.
+            h.push(12);
+            h.extend_from_slice(b"32-bit float");
+            h.push(0);
+        }
         h.extend_from_slice(b"SSND");
         h.extend_from_slice(&(8 + data_bytes).to_be_bytes());
         h.extend_from_slice(&0u32.to_be_bytes());
@@ -372,6 +469,11 @@ impl Pcm16Writer {
         }
         Ok(())
     }
+}
+
+#[inline]
+fn to_int(x: f32, scale: f32) -> i32 {
+    (x * scale).round().clamp(-scale, scale - 1.0) as i32
 }
 
 /// Encodes a positive f64 as Apple's 80-bit IEEE 754 extended float.

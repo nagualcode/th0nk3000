@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # cargo-truce from the same truce revision Cargo.lock pins.
+  TRUCE_REV: 25791270cf7ca1309cb6bdc6fa75a6fe94617d1c
+  PLUGINVAL_URL: https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_macOS.zip
+  CLAP_VALIDATOR_URL: https://github.com/free-audio/clap-validator/releases/download/0.4.1/clap-validator-0.4.1-127-g152b982-macos-universal.zip
+
+jobs:
+  test-and-validate:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit, engine and score regression tests
+        run: cargo test --release --locked
+
+      - name: Install cargo-truce
+        run: cargo install --git https://github.com/truce-audio/truce --rev "$TRUCE_REV" cargo-truce --locked
+
+      - name: Build and install AU / VST3 / CLAP (user folders)
+        run: cargo truce install --clap --vst3 --au2 --user
+
+      - name: Fetch validators
+        run: |
+          mkdir -p "$RUNNER_TEMP/validators" && cd "$RUNNER_TEMP/validators"
+          curl -sSfL -o pluginval.zip "$PLUGINVAL_URL" && unzip -q pluginval.zip
+          curl -sSfL -o cv.zip "$CLAP_VALIDATOR_URL" && unzip -q cv.zip
+          tar xzf clap-validator-*.tar.gz
+          echo "PLUGINVAL=$PWD/pluginval.app/Contents/MacOS/pluginval" >> "$GITHUB_ENV"
+          echo "CLAP_VALIDATOR=$PWD/binaries/clap-validator" >> "$GITHUB_ENV"
+
+      - name: auval (AU v2) and pluginval (VST3)
+        run: |
+          killall -9 AudioComponentRegistrar || true
+          cargo truce validate --auval --pluginval --skip-gui-tests
+
+      - name: clap-validator (CLAP)
+        # The three state-reproducibility tests are excluded because they fail
+        # identically for truce's own examples (truce v6.3.0); everything else
+        # must pass.
+        run: |
+          "$CLAP_VALIDATOR" validate "$HOME/Library/Audio/Plug-Ins/CLAP/Th0nk.clap" \
+            -x state-reproducibility

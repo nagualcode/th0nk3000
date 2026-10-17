@@ -101,6 +101,49 @@ impl ScoreType {
     }
 }
 
+/// How the composition length relates to the score's own length.
+#[derive(ParamEnum, Default, Debug)]
+pub enum LengthMode {
+    /// The score's own length (20 min, or 1 / 5 min for the stretches) and the
+    /// original ending: the file runs until the last grain.
+    #[default]
+    #[name = "Original"]
+    Original,
+    /// The whole score is time-scaled into the chosen length.
+    #[name = "Stretch"]
+    Stretch,
+    /// The score plays at its own pace and stops at the chosen length.
+    #[name = "Cut"]
+    Cut,
+}
+
+/// Length settings for a composition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Length {
+    pub mode: LengthMode,
+    pub secs: f64,
+}
+
+impl Default for Length {
+    fn default() -> Self {
+        Self {
+            mode: LengthMode::Original,
+            secs: 1200.0,
+        }
+    }
+}
+
+impl Length {
+    /// Effective length for a score whose own length is `native` seconds.
+    pub fn effective(&self, native: f64) -> f64 {
+        match self.mode {
+            LengthMode::Original => native,
+            LengthMode::Stretch => self.secs,
+            LengthMode::Cut => self.secs.min(native),
+        }
+    }
+}
+
 /// The QuickDraw `Random()` trap: Park-Miller minimal standard generator on
 /// `qd.randSeed`, returning the low 16 bits, with 0x8000 mapped to 0.
 /// The original seeds it with `GetDateTime(&qd.randSeed)` at the start of every score.
@@ -350,9 +393,53 @@ impl FmList {
         1.059_463_094_34f64.powf(semis)
     }
 
+    /// Interpolated pitches and voice probabilities at `time`, without drawing.
+    pub fn voices_at(&self, time: f64) -> [(f32, f32); 4] {
+        let (pitch, w) = match self.nodes.first() {
+            None => return [(0.0, 1.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)],
+            Some(head) if time < head.time => (head.pitch, head.weight),
+            Some(_) => {
+                let i = self.nodes.partition_point(|n| n.time < time).saturating_sub(1);
+                let p = &self.nodes[i];
+                match self.nodes.get(i + 1) {
+                    None => (p.pitch, p.weight),
+                    Some(n) => {
+                        let dt = (n.time - p.time).max(0.01);
+                        let f = (time - p.time) / dt;
+                        let mut pitch = [0.0; 4];
+                        let mut w = [0.0; 4];
+                        for k in 0..4 {
+                            pitch[k] = p.pitch[k] + f * (n.pitch[k] - p.pitch[k]);
+                            w[k] = p.weight[k] + f * (n.weight[k] - p.weight[k]);
+                        }
+                        (pitch, w)
+                    }
+                }
+            }
+        };
+        let w4 = 100.0 - w[0] - w[1] - w[2];
+        let probs = [w[0], w[1], w[2], w4].map(|x| (x / 100.0).clamp(0.0, 1.0) as f32);
+        [0, 1, 2, 3].map(|k| (pitch[k] as f32, probs[k]))
+    }
+
     fn weights(w: &[f64; 4]) -> [i16; 3] {
         [trunc16(w[0]), trunc16(w[1]), trunc16(w[2])]
     }
+}
+
+/// Score curves sampled for display.
+#[derive(Clone, Debug, Default)]
+pub struct Lanes {
+    /// Granular frequency, grains/s.
+    pub gf: Vec<f32>,
+    /// Estimated overlapping layers (grains/s × grain length).
+    pub layers: Vec<f32>,
+    /// Balance 0 (left) .. 2 (right).
+    pub balance: Vec<f32>,
+    /// Read position in the source, 0..1.
+    pub source: Vec<f32>,
+    /// Pitch (semitones) and probability (0..1) of the four transposer voices.
+    pub voices: Vec<[(f32, f32); 4]>,
 }
 
 /// The 23 pentatonic steps copied onto the stack by `PentaScore` (data offset 0xeac).
@@ -387,7 +474,12 @@ struct ClassicSpec {
 /// Complete score: the 16 breakpoint lists the original allocates in `SetFirstBreakPoints`.
 pub struct ScoreState {
     pub resolved: ScoreType,
+    /// Length the composition plays for (after the length setting).
     pub total_duration: f64,
+    /// The score's own length.
+    pub native_duration: f64,
+    /// True when the composition ends exactly at `total_duration` (Stretch / Cut).
+    pub hard_end: bool,
     pub source_duration: f64,
 
     pub gf: BreakPointList,      // granular frequency (grains/s), exponential
@@ -425,6 +517,8 @@ impl ScoreState {
         Self {
             resolved: ScoreType::ClassicFlowing,
             total_duration: 1200.0,
+            native_duration: 1200.0,
+            hard_end: false,
             source_duration: 1.0,
             gf: bp(),
             gf_rnd: bp(),
@@ -447,13 +541,22 @@ impl ScoreState {
     }
 
     pub fn generate(score_type: ScoreType, source_duration: f64, seed: u32) -> Self {
+        Self::generate_with(score_type, source_duration, seed, Length::default())
+    }
+
+    pub fn generate_with(score_type: ScoreType, source_duration: f64, seed: u32, length: Length) -> Self {
         let mut s = Self::new();
-        s.regenerate(score_type, source_duration, seed);
+        s.regenerate_with(score_type, source_duration, seed, length);
         s
     }
 
-    /// Rebuilds the score in place (no allocation once capacity is reserved).
     pub fn regenerate(&mut self, score_type: ScoreType, source_duration: f64, seed: u32) {
+        self.regenerate_with(score_type, source_duration, seed, Length::default());
+    }
+
+    /// Rebuilds the score in place (no allocation once capacity is reserved),
+    /// then applies the length setting.
+    pub fn regenerate_with(&mut self, score_type: ScoreType, source_duration: f64, seed: u32, length: Length) {
         let mut rng = MacRandom::new(seed);
         self.clear();
         self.source_duration = source_duration;
@@ -545,7 +648,44 @@ impl ScoreState {
             ScoreType::Stochastic => unreachable!(),
         }
 
+        self.native_duration = self.total_duration;
+        self.total_duration = length.effective(self.native_duration);
+        self.hard_end = length.mode != LengthMode::Original;
+        if length.mode == LengthMode::Stretch {
+            self.scale_time(self.total_duration / self.native_duration);
+        }
         self.finish();
+    }
+
+    /// Multiplies every breakpoint time (except the 1e9 defaults) by `k`.
+    fn scale_time(&mut self, k: f64) {
+        for l in self.lists_mut() {
+            for p in l.points.iter_mut().filter(|p| p.time < DEFAULT_TIME) {
+                p.time *= k;
+            }
+        }
+        for n in self.fm.nodes.iter_mut().filter(|n| n.time < DEFAULT_TIME) {
+            n.time *= k;
+        }
+    }
+
+    /// Deterministic curves for display: `n` columns over the composition,
+    /// without the randomisers.
+    pub fn lanes(&self, n: usize, source_sr: f64) -> Lanes {
+        let mut lanes = Lanes::default();
+        let dur = self.total_duration.max(1e-3);
+        for i in 0..n {
+            let t = (i as f64 + 0.5) / n as f64 * dur;
+            let gf = self.gf.find_exp(t).abs();
+            let gl = self.gl.find_lin(t).max(0.0);
+            lanes.gf.push(gf as f32);
+            lanes.layers.push((gf * gl / source_sr.max(1.0)) as f32);
+            lanes.balance.push(self.balance.find_lin(t).clamp(0.0, 2.0) as f32);
+            let so = self.so.find_lin(t) / self.source_duration.max(1e-6);
+            lanes.source.push(so.clamp(0.0, 1.0) as f32);
+            lanes.voices.push(self.fm.voices_at(t));
+        }
+        lanes
     }
 
     /// Evaluates granular frequency at time `t` (`FindGranFreq`, no randomiser).
@@ -1035,6 +1175,34 @@ mod tests {
             assert_eq!(n.weight[0] + n.weight[1] + n.weight[2], 90.0);
         }
         assert_eq!(s.so.find_lin(60.0), 4.0);
+    }
+
+    #[test]
+    fn stretch_scales_all_breakpoint_times() {
+        let len = Length { mode: LengthMode::Stretch, secs: 120.0 };
+        let a = ScoreState::generate(ScoreType::ClassicHectic, 4.0, 7);
+        let b = ScoreState::generate_with(ScoreType::ClassicHectic, 4.0, 7, len);
+        assert_eq!(b.total_duration, 120.0);
+        assert!(b.hard_end);
+        // Same composition, ten times faster.
+        assert!((a.gf.find_exp(600.0) - b.gf.find_exp(60.0)).abs() < 1e-6);
+        assert!((a.gain.find_lin(15.0) - b.gain.find_lin(1.5)).abs() < 1e-6);
+        let cut = ScoreState::generate_with(
+            ScoreType::OctavesStretch1Min,
+            4.0,
+            7,
+            Length { mode: LengthMode::Cut, secs: 600.0 },
+        );
+        assert_eq!(cut.total_duration, 60.0);
+    }
+
+    #[test]
+    fn lanes_have_requested_columns() {
+        let s = make(ScoreType::Shepard);
+        let l = s.lanes(300, 44100.0);
+        assert_eq!(l.gf.len(), 300);
+        assert_eq!(l.voices.len(), 300);
+        assert!(l.voices.iter().all(|v| (v.iter().map(|x| x.1).sum::<f32>() - 1.0).abs() < 0.02));
     }
 
     #[test]
