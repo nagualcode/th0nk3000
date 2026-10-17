@@ -25,6 +25,11 @@ pub struct ThonkParams {
     )]
     pub density: FloatParam,
 
+    /// 0 = a new random composition on every Thonk (the original seeded from the
+    /// clock); any other value recalls the same composition.
+    #[param(name = "Seed", range = "discrete(0, 999999)", default = 0)]
+    pub seed: IntParam,
+
     #[param(
         name = "Output Gain",
         range = "linear(-24, 12)",
@@ -55,6 +60,18 @@ pub struct ThonkParams {
     #[skip]
     pub render_status: RwLock<Option<String>>,
 
+    /// The previous source, handed back by the audio thread so the UI drops it.
+    #[skip]
+    pub retired_file: RwLock<Option<AudioBufferData>>,
+
     #[skip]
     pub trigger_counter: AtomicU32,
+
+    /// Seed of the composition currently playing (for display / recall).
+    #[skip]
+    pub playing_seed: AtomicU32,
+
+    /// Index of the score currently playing (resolves ztochazt!k).
+    #[skip]
+    pub playing_score: AtomicU32,
 }

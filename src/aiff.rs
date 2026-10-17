@@ -12,9 +12,25 @@ pub struct AudioBufferData {
     pub sample_rate: f64,
     pub channels: usize,
     pub samples: Vec<f32>, // Mono or mixed down to mono for granular processing
+    /// The same material as 16-bit PCM: thOnk_0+2 only ever read 16-bit mono AIFF.
+    pub pcm16: Vec<i16>,
 }
 
 impl AudioBufferData {
+    fn new(name: String, sample_rate: f64, samples: Vec<f32>) -> Self {
+        let pcm16 = samples
+            .iter()
+            .map(|&s| (s * 32768.0).round().clamp(-32768.0, 32767.0) as i16)
+            .collect();
+        Self {
+            name,
+            sample_rate,
+            channels: 1,
+            samples,
+            pcm16,
+        }
+    }
+
     /// Creates a default built-in synthetic test sound (rich harmonic chime/burst).
     pub fn default_chime(sample_rate: f64) -> Self {
         let duration_secs = 2.5;
@@ -34,12 +50,7 @@ impl AudioBufferData {
             samples.push((sig * decay) as f32);
         }
 
-        Self {
-            name: "Default Antiorp Metallic Burst".to_string(),
-            sample_rate,
-            channels: 1,
-            samples,
-        }
+        Self::new("Default Antiorp Metallic Burst".to_string(), sample_rate, samples)
     }
 
     /// Loads an audio file (WAV or AIFF) from disk.
@@ -101,12 +112,10 @@ impl AudioBufferData {
             samples
         };
 
-        Ok(Self {
-            name,
-            sample_rate,
-            channels: 1,
-            samples: mono_samples,
-        })
+        if sample_rate <= 0.0 || !sample_rate.is_finite() {
+            return Err("Invalid sample rate".to_string());
+        }
+        Ok(Self::new(name, sample_rate, mono_samples))
     }
 
     fn load_aiff(path: &Path, name: String) -> Result<Self, String> {
@@ -227,12 +236,10 @@ impl AudioBufferData {
             float_samples
         };
 
-        Ok(Self {
-            name,
-            sample_rate,
-            channels: 1,
-            samples: mono_samples,
-        })
+        if sample_rate <= 0.0 || !sample_rate.is_finite() {
+            return Err("Invalid sample rate".to_string());
+        }
+        Ok(Self::new(name, sample_rate, mono_samples))
     }
 }
 
@@ -253,4 +260,142 @@ fn decode_extended_80(bytes: &[u8; 10]) -> f64 {
     let value = normalized_mantissa * 2.0f64.powf(factor);
 
     if sign { -value } else { value }
+}
+
+/// Streaming 16-bit stereo writer: AIFF when the path ends in .aif/.aiff
+/// (big-endian, 80-bit extended sample rate, as thOnk_0+2 wrote), WAV otherwise.
+pub enum Pcm16Writer {
+    Wav(hound::WavWriter<std::io::BufWriter<File>>),
+    Aiff {
+        out: std::io::BufWriter<File>,
+        sample_rate: f64,
+        frames: u32,
+    },
+}
+
+impl Pcm16Writer {
+    pub fn create(path: &Path, sample_rate: f64) -> Result<Self, String> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if ext == "aif" || ext == "aiff" {
+            let file = File::create(path).map_err(|e| e.to_string())?;
+            let mut w = Self::Aiff {
+                out: std::io::BufWriter::new(file),
+                sample_rate,
+                frames: 0,
+            };
+            w.write_aiff_header()?;
+            Ok(w)
+        } else {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: sample_rate.round() as u32,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            hound::WavWriter::create(path, spec)
+                .map(Self::Wav)
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    /// Writes interleaved L/R frames.
+    pub fn write_frames(&mut self, interleaved: &[i16]) -> Result<(), String> {
+        use std::io::Write;
+        match self {
+            Self::Wav(w) => {
+                let mut w16 = w.get_i16_writer(interleaved.len() as u32);
+                for &s in interleaved {
+                    w16.write_sample(s);
+                }
+                w16.flush().map_err(|e| e.to_string())
+            }
+            Self::Aiff { out, frames, .. } => {
+                let mut buf = Vec::with_capacity(interleaved.len() * 2);
+                for &s in interleaved {
+                    buf.extend_from_slice(&s.to_be_bytes());
+                }
+                *frames += (interleaved.len() / 2) as u32;
+                out.write_all(&buf).map_err(|e| e.to_string())
+            }
+        }
+    }
+
+    pub fn finalize(self) -> Result<(), String> {
+        use std::io::Write;
+        match self {
+            Self::Wav(w) => w.finalize().map_err(|e| e.to_string()),
+            mut aiff @ Self::Aiff { .. } => {
+                aiff.write_aiff_header()?;
+                if let Self::Aiff { mut out, .. } = aiff {
+                    out.flush().map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// (Re)writes FORM/COMM/SSND headers at the start of the file.
+    fn write_aiff_header(&mut self) -> Result<(), String> {
+        use std::io::Write;
+        let Self::Aiff {
+            out,
+            sample_rate,
+            frames,
+        } = self
+        else {
+            return Ok(());
+        };
+        let data_bytes = *frames * 4;
+        let mut h = Vec::with_capacity(54);
+        h.extend_from_slice(b"FORM");
+        h.extend_from_slice(&(4 + 26 + 16 + data_bytes).to_be_bytes());
+        h.extend_from_slice(b"AIFF");
+        h.extend_from_slice(b"COMM");
+        h.extend_from_slice(&18u32.to_be_bytes());
+        h.extend_from_slice(&2u16.to_be_bytes());
+        h.extend_from_slice(&frames.to_be_bytes());
+        h.extend_from_slice(&16u16.to_be_bytes());
+        h.extend_from_slice(&encode_extended_80(*sample_rate));
+        h.extend_from_slice(b"SSND");
+        h.extend_from_slice(&(8 + data_bytes).to_be_bytes());
+        h.extend_from_slice(&0u32.to_be_bytes());
+        h.extend_from_slice(&0u32.to_be_bytes());
+        let pos = out.stream_position().map_err(|e| e.to_string())?;
+        out.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        out.write_all(&h).map_err(|e| e.to_string())?;
+        if pos > h.len() as u64 {
+            out.seek(SeekFrom::Start(pos)).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/// Encodes a positive f64 as Apple's 80-bit IEEE 754 extended float.
+fn encode_extended_80(value: f64) -> [u8; 10] {
+    let mut out = [0u8; 10];
+    if value <= 0.0 || !value.is_finite() {
+        return out;
+    }
+    let exp = value.log2().floor() as i32;
+    let mantissa = (value / 2f64.powi(exp) * (1u64 << 63) as f64) as u64;
+    let biased = (exp + 16383) as u16;
+    out[..2].copy_from_slice(&biased.to_be_bytes());
+    out[2..].copy_from_slice(&mantissa.to_be_bytes());
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extended_80_roundtrip() {
+        for sr in [8000.0, 22050.0, 44100.0, 48000.0, 96000.0, 192000.0] {
+            assert_eq!(decode_extended_80(&encode_extended_80(sr)), sr);
+        }
+    }
 }

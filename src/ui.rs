@@ -3,6 +3,8 @@
 
 use crate::aiff::AudioBufferData;
 use crate::params::{ThonkParams, ThonkParamsParamId as P};
+use crate::score::ScoreType;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use truce::prelude::*;
 use truce_core::editor::PluginContext;
@@ -26,6 +28,11 @@ const ACCENT_RED: egui::Color32 = egui::Color32::from_rgb(255, 60, 60);
 
 pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
     let params: &Arc<ThonkParams> = ctx.params();
+
+    // Free a source buffer the audio thread swapped out.
+    if let Ok(mut retired) = params.retired_file.try_write() {
+        retired.take();
+    }
 
     // Top Header Banner
     egui::Panel::top("top_banner")
@@ -91,7 +98,7 @@ pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
                 .min_size(egui::vec2(ui.available_width() * 0.5 - 3.0, 40.0));
 
                 if ui.add(thonk_btn).clicked() {
-                    params.trigger_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    params.trigger_counter.fetch_add(1, Ordering::Relaxed);
                 }
 
                 let render_btn = egui::Button::new(
@@ -107,12 +114,17 @@ pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
                     let params_clone = params.clone();
                     std::thread::spawn(move || {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Audio File", &["wav", "aiff"])
+                            .add_filter("WAV", &["wav"])
+                            .add_filter("AIFF", &["aif", "aiff"])
                             .set_file_name("thonk_rendered.wav")
                             .set_title("Save ThOnk Rendered Sound (16-bit)")
                             .save_file()
                         {
                             let score_type = params_clone.score.value();
+                            let seed = match params_clone.seed.value() {
+                                0 => None,
+                                v => Some(v as u32),
+                            };
                             let wrapping = params_clone.wrapping_distortion.value();
                             let density = params_clone.density.read() / 100.0;
                             let gain = params_clone.gain.read();
@@ -127,10 +139,10 @@ pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
                             let res = crate::engine::offline_render_to_file(
                                 source,
                                 score_type,
+                                seed,
                                 wrapping,
                                 density,
                                 gain,
-                                44100.0,
                                 &path,
                                 move |_prog, msg| {
                                     if let Ok(mut status) = params_cb.render_status.write() {
@@ -141,9 +153,9 @@ pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
 
                             if let Ok(mut status) = params_clone.render_status.write() {
                                 match res {
-                                    Ok(_) => {
+                                    Ok(seed) => {
                                         *status = Some(format!(
-                                            "COMPLETE: {}",
+                                            "COMPLETE: {} (seed {seed})",
                                             path.file_name().unwrap_or_default().to_string_lossy()
                                         ));
                                     }
@@ -255,6 +267,28 @@ pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
                         .size(10.0)
                         .color(TEXT_MUTED),
                 );
+
+                let playing = ScoreType::from_index(
+                    params.playing_score.load(Ordering::Relaxed) as usize,
+                );
+                let seed = params.playing_seed.load(Ordering::Relaxed);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                    ui.label(
+                        egui::RichText::new(format!("PLAYING: {} | SEED {seed}", playing.name()))
+                            .size(9.5)
+                            .color(DIM_GREEN),
+                    );
+                    let locked = params.seed.value() != 0;
+                    let label = if locked { "UNLOCK SEED" } else { "LOCK SEED" };
+                    if ui
+                        .small_button(egui::RichText::new(label).size(9.0).color(PHOSPHOR_GREEN))
+                        .clicked()
+                    {
+                        let target = if locked { 0.0 } else { seed as f64 / 999_999.0 };
+                        ctx.automate(P::Seed, target);
+                    }
+                });
             });
 
             // Controls: Checkboxes and Knobs
@@ -298,7 +332,7 @@ pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
 
                 let density_val = ctx.get_meter(P::MeterDensity);
-                let active_grains = (density_val * 600.0) as usize;
+                let active_grains = (density_val * 600.0).round() as usize;
 
                 ui.horizontal(|ui| {
                     ui.label(
@@ -308,7 +342,7 @@ pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
                             .strong(),
                     );
                     ui.label(
-                        egui::RichText::new(format!("{active_grains} / 600 max"))
+                        egui::RichText::new(format!("{active_grains} / 600 (manual's max)"))
                             .size(10.0)
                             .color(if active_grains > 500 {
                                 ACCENT_RED
@@ -358,7 +392,7 @@ pub fn thonk_ui(ui: &mut egui::Ui, ctx: &PluginContext<ThonkParams>) {
                             };
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "State: COLLIDING | Mode: {wrap_str} | Source: {input_str} | Max 600 Layers"
+                                    "State: COLLIDING | Mode: {wrap_str} | Source: {input_str}"
                                 ))
                                 .size(9.0)
                                 .color(TEXT_MUTED),
