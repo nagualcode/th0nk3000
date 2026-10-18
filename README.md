@@ -17,11 +17,8 @@
 **th0nk3000** is a modern recreation of **thOnk_0+2** (1996–1999), the cult Mac OS
 freeware sound generator by **Arjen van der Schoot** / Audio Ease, with an interface
 by **=cw4t7abs** (antiorp). It was rebuilt from the original PowerPC executable:
-the granular engine and all of its scores are a translation of the binary, not an
-imitation of its sound.
+the granular engine and all of its scores are a translation of the binary.
 
-It runs as a **standalone app**, as an **audio plugin (AU v2, VST3, CLAP)** and as
-a **command-line renderer**, on macOS.
 
 ![th0nk3000, modern theme](docs/screenshot.png)
 
@@ -59,8 +56,7 @@ values are interpolated between breakpoints, so the parameters *"fight for the
 attention of the listener"*. When many grains overlap, thOnk does not clip: its
 16-bit adds **wrap around** (*"Compared to which clipping is a picnic"*).
 
-th0nk3000 plays that same process in real time and also renders it to disk, as
-the original did.
+th0nk3000 plays that same process in real time and also renders it to disk.
 
 ## Quick start
 
