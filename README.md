@@ -324,9 +324,9 @@ th0nk3000/
 │   ├── disasm_ppc.py       # PowerPC disassembler with TOC annotation
 │   ├── unpack_data_sec.py / unpacked_data_sec.bin
 │   ├── pefloader.java / sectionheader.java
-│   ├── thOnk_0+2 ReadMe:Manual.txt
+│   ├── thOnk_0+2 ReadMe-Manual.txt
 │   └── original_binaries/
-└── .github/workflows/ci.yml
+└── .github/workflows/      # ci.yml, release.yml
 ```
 
 ## License and credits

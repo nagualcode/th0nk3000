@@ -175,18 +175,7 @@ jobs:
       run:
         shell: bash
     steps:
-      # Sparse checkout, not a full one: the repo carries
-      # `reverse_engineering/thOnk_0+2 ReadMe:Manual.txt` (a Mac OS 9
-      # filename - `:` was the path separator there), and `:` is illegal
-      # in an NTFS path, so a full checkout dies with `error: invalid
-      # path` before any build step runs. Cone mode gives us every
-      # root-level file (Cargo.toml, Cargo.lock, truce.toml) plus the
-      # directories listed here, and skips that one.
       - uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            src
-            assets
 
       - uses: dtolnay/rust-toolchain@stable
 

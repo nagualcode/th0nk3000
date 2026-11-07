@@ -9,7 +9,7 @@ can be traced back to an address listed here.
 |---|---|
 | `original_binaries/thOnk_0+2.app` | Data fork of the original app: a PEF (`Joy!peffpwpc`) container |
 | `original_binaries/thOnk-resource-fork.bin` | Its resource fork (dialogs, menus, PICTs, strings) |
-| `thOnk_0+2 ReadMe:Manual.txt` | The original manual |
+| `thOnk_0+2 ReadMe-Manual.txt` | The original manual. Mac OS 9 named it `thOnk_0+2 ReadMe:Manual.txt`, with the classic-Mac path separator in it; `:` is illegal in an NTFS path and made the repo impossible to clone on Windows, so the colon became a hyphen here. |
 | `pefloader.java`, `sectionheader.java` | Ghidra scripts used to load the PEF |
 | `thOnk_0+2.c` | Full Ghidra decompilation (symbols survived: the binary has `.debug::` names) |
 | `unpack_data_sec.py` | Decompressor for the pattern-initialised data section |
