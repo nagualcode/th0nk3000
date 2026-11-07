@@ -1,0 +1,255 @@
+name: Release
+
+# Builds the release binaries for the three supported platforms and
+# attaches them to the GitHub release for the tag that triggered the run.
+#
+#   macOS (Apple Silicon)  AU v2 + VST3 + CLAP + Standalone .app + CLI
+#                          -> thonk-<version>-macos.pkg
+#                          -> thonk-<version>-macos-arm64.zip
+#   Linux (x86_64)         CLAP + VST3 + LV2 + Standalone + CLI
+#                          -> thonk-<version>-linux-x86_64.tar.gz (install.sh)
+#                          -> thonk-<version>-linux-x86_64.zip
+#   Windows (x64)          CLAP + VST3 + Standalone + CLI
+#                          -> thonk-<version>-windows.exe (Inno Setup)
+#                          -> thonk-<version>-windows-x64.zip
+#
+# Tag a release (`git tag v0.4.2 && git push --tags`) to publish, or run
+# the workflow manually from the Actions tab to build the artifacts
+# without touching any release (`publish: false`).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Upload the artifacts to the release for this tag"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # cargo-truce from the same truce revision Cargo.lock pins.
+  TRUCE_REV: 25791270cf7ca1309cb6bdc6fa75a6fe94617d1c
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon)
+    # macos-14 and later are arm64 runners, so --host-only yields an
+    # Apple Silicon build. Intel Macs build from source (see README).
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos-14
+          cache-bin: false
+
+      - name: Version from Cargo.toml
+        run: echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_ENV"
+
+      - name: Unit, engine and score regression tests
+        run: cargo test --release --locked
+
+      - name: Install cargo-truce
+        run: cargo install --git https://github.com/truce-audio/truce --rev "$TRUCE_REV" cargo-truce --locked
+
+      - name: Build plugin bundles (AU v2 / VST3 / CLAP)
+        run: cargo truce build --clap --vst3 --au2
+
+      - name: Command-line renderer
+        run: cargo build --release --locked --bin thonk-render
+
+      # --no-notarize: notarization needs a paid Apple Developer account
+      # and a notary keychain profile, neither of which is in CI. The pkg
+      # is still ad-hoc codesigned; the README tells users how to clear
+      # the quarantine flag.
+      - name: Installer (.pkg)
+        run: cargo truce package --host-only --no-notarize --formats clap,vst3,au2,standalone
+
+      - name: Zip for manual install
+        run: |
+          set -euo pipefail
+          app=$(find target/package -maxdepth 5 -name '*.app' -print -quit)
+          test -n "$app" || { echo "standalone .app not found under target/package"; exit 1; }
+          stage="$RUNNER_TEMP/thonk-$VERSION-macos-arm64"
+          mkdir -p "$stage"/{AU,VST3,CLAP,Standalone,CLI}
+          cp -R target/bundles/*.component "$stage/AU/"
+          cp -R target/bundles/*.vst3      "$stage/VST3/"
+          cp -R target/bundles/*.clap      "$stage/CLAP/"
+          cp -R "$app"                     "$stage/Standalone/"
+          cp target/release/thonk-render    "$stage/CLI/"
+          mkdir -p dist
+          # -y keeps the bundles' symlinks (VST3/AU frameworks) intact.
+          (cd "$stage" && zip -qry "$GITHUB_WORKSPACE/dist/thonk-$VERSION-macos-arm64.zip" .)
+          cp target/dist/thonk-*-macos.pkg dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-ubuntu-24.04
+          cache-bin: false
+
+      # Same set truce's own Linux CI installs: X11/GL for the editor,
+      # ALSA/JACK for the standalone host, fontconfig/freetype for text.
+      - name: Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-dri2-0-dev libxcb-icccm4-dev libxcursor-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxrandr-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev \
+            libasound2-dev libjack-jackd2-dev \
+            libfontconfig1-dev libfreetype-dev
+
+      - name: Version from Cargo.toml
+        run: echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_ENV"
+
+      - name: Install cargo-truce
+        run: cargo install --git https://github.com/truce-audio/truce --rev "$TRUCE_REV" cargo-truce --locked
+
+      # AU is macOS-only, so Linux gets the LV2 wrapper instead - the
+      # format Ardour / Qtractor / Carla look for first.
+      - name: Build plugin bundles (CLAP / VST3 / LV2)
+        run: cargo truce build --clap --vst3 --lv2
+
+      - name: Standalone host and command-line renderer
+        run: |
+          cargo build --release --locked --no-default-features \
+            --features clap,vst3,lv2,standalone-playback \
+            --bin thonk-standalone --bin thonk-render
+
+      - name: Installer tarball (.tar.gz + install.sh)
+        run: cargo truce package --formats clap,vst3,lv2,standalone
+
+      - name: Zip for manual install
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/thonk-$VERSION-linux-x86_64"
+          mkdir -p "$stage"/{CLAP,VST3,LV2,Standalone,CLI}
+          cp -R target/bundles/*.clap "$stage/CLAP/"
+          cp -R target/bundles/*.vst3 "$stage/VST3/"
+          cp -R target/bundles/*.lv2  "$stage/LV2/"
+          cp target/release/thonk-standalone "$stage/Standalone/"
+          cp target/release/thonk-render     "$stage/CLI/"
+          mkdir -p dist
+          (cd "$stage" && zip -qry "$GITHUB_WORKSPACE/dist/thonk-$VERSION-linux-x86_64.zip" .)
+          cp target/dist/thonk-*-linux-*.tar.gz dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows-latest
+          cache-bin: false
+
+      # cargo-truce's `locate_iscc` looks for ISCC.exe in
+      # `C:\Program Files (x86)\Inno Setup 6\` first - where the choco
+      # package puts it.
+      - name: Install Inno Setup 6
+        run: choco install innosetup --no-progress --yes
+
+      - name: Version from Cargo.toml
+        run: echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_ENV"
+
+      - name: Install cargo-truce
+        run: cargo install --git https://github.com/truce-audio/truce --rev "$TRUCE_REV" cargo-truce --locked
+
+      - name: Build plugin bundles (CLAP / VST3)
+        run: cargo truce build --clap --vst3
+
+      - name: Standalone host and command-line renderer
+        run: |
+          cargo build --release --locked --no-default-features \
+            --features clap,vst3,standalone-playback \
+            --bin thonk-standalone --bin thonk-render
+
+      # --host-only keeps this to x86_64; drop it (and add the
+      # aarch64-pc-windows-msvc target) to also ship a Windows-on-ARM
+      # slice. No Authenticode signing: no certificate in CI, so the
+      # installer comes out unsigned but valid.
+      - name: Installer (.exe)
+        run: cargo truce package --host-only --formats clap,vst3,standalone
+
+      - name: Zip for manual install
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/thonk-$VERSION-windows-x64"
+          mkdir -p "$stage"/{CLAP,VST3,Standalone,CLI}
+          cp -R target/bundles/*.clap "$stage/CLAP/"
+          cp -R target/bundles/*.vst3 "$stage/VST3/"
+          cp target/release/thonk-standalone.exe "$stage/Standalone/"
+          cp target/release/thonk-render.exe     "$stage/CLI/"
+          mkdir -p dist
+          (cd "$stage" && 7z a -tzip -bso0 "$GITHUB_WORKSPACE/dist/thonk-$VERSION-windows-x64.zip" .)
+          cp target/dist/thonk-*-windows*.exe dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Attach to release
+    needs: [macos, linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          # Create the release as a draft if the tag has none yet, so the
+          # notes can be written before it goes public.
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --draft --title "Th0nk $TAG" --generate-notes
+          gh release upload "$TAG" dist/* --clobber

@@ -211,6 +211,10 @@ A dense 20-minute score renders at about 110–260× real time on Apple Silicon.
 ## Install
 
 Download from the [Releases](https://github.com/nagualcode/th0nk3000/releases) page.
+Every release is built by GitHub Actions for **macOS (Apple Silicon)**,
+**Linux (x86_64)** and **Windows (x64)**.
+
+### macOS (Apple Silicon)
 
 - **`thonk-<version>-macos.pkg`**: installer; pick the formats you want.
 - **`thonk-<version>-macos-arm64.zip`**: copy by hand:
@@ -220,15 +224,42 @@ Download from the [Releases](https://github.com/nagualcode/th0nk3000/releases) p
   - `Standalone/Th0nk.app` → `/Applications/`
   - `CLI/thonk-render` → anywhere on your `PATH`
 
-Release 0.4.0 is built for **Apple Silicon**; Intel Macs can build from source.
-The binaries are ad-hoc signed, not notarised. If macOS blocks one, right-click →
-Open, or run `xattr -dr com.apple.quarantine <file>`. To make Logic pick up a new
-version of the AU, run `killall -9 AudioComponentRegistrar` and reopen Logic.
+Intel Macs can build from source. The binaries are ad-hoc signed, not notarised.
+If macOS blocks one, right-click → Open, or run
+`xattr -dr com.apple.quarantine <file>`. To make Logic pick up a new version of
+the AU, run `killall -9 AudioComponentRegistrar` and reopen Logic.
+
+### Linux (x86_64)
+
+- **`thonk-<version>-linux-x86_64.tar.gz`**: unpack and run `./install.sh`.
+- **`thonk-<version>-linux-x86_64.zip`**: copy by hand:
+  - `CLAP/Th0nk.clap` → `~/.clap/`
+  - `VST3/Th0nk.vst3` → `~/.vst3/`
+  - `LV2/th0nk.lv2` → `~/.lv2/`
+  - `Standalone/thonk-standalone` and `CLI/thonk-render` → anywhere on your `PATH`
+
+Needs ALSA or JACK plus X11/OpenGL at runtime.
+
+### Windows (x64)
+
+- **`thonk-<version>-windows.exe`**: installer; pick the formats you want.
+- **`thonk-<version>-windows-x64.zip`**: copy by hand:
+  - `CLAP/Th0nk.clap` → `%LOCALAPPDATA%\Programs\Common\CLAP\`
+  - `VST3/Th0nk.vst3` → `%LOCALAPPDATA%\Programs\Common\VST3\`
+  - `Standalone/thonk-standalone.exe` and `CLI/thonk-render.exe` → anywhere
+
+The installer is unsigned, so SmartScreen shows "More info → Run anyway" on the
+first launch. AU is macOS-only and LV2 is Linux-only; the other formats are on
+every platform.
 
 ## Build from source
 
-Requirements: macOS 12+, Rust 1.85+, and for bundles/installers
-[`cargo-truce`](https://github.com/truce-audio/truce).
+Requirements: macOS 12+, Linux or Windows 10+, Rust 1.85+, and for
+bundles/installers [`cargo-truce`](https://github.com/truce-audio/truce)
+(plus Inno Setup 6 on Windows). On Debian/Ubuntu the build needs
+`build-essential pkg-config libx11-dev libx11-xcb-dev libxcb1-dev
+libxcursor-dev libxkbcommon-x11-dev libxrandr-dev libgl1-mesa-dev
+libasound2-dev libjack-jackd2-dev libfontconfig1-dev libfreetype-dev`.
 
 ```bash
 git clone https://github.com/nagualcode/th0nk3000.git
@@ -238,11 +269,12 @@ cargo test --release                        # tests
 cargo run --release --bin thonk-standalone  # standalone app
 cargo build --release --bin thonk-render    # command-line renderer
 
-# plugins into ~/Library/Audio/Plug-Ins
+# plugins into the per-user plug-in folders
 cargo install --git https://github.com/truce-audio/truce cargo-truce
-cargo truce install --clap --vst3 --au2 --user
+cargo truce install --clap --vst3 --au2 --user   # --lv2 instead of --au2 on Linux
 
-# installers (add --universal for arm64 + x86_64)
+# installers: .pkg on macOS, .tar.gz on Linux, .exe on Windows
+# (drop --host-only for a universal macOS / Windows build)
 cargo truce package --host-only --no-notarize --formats clap,vst3,au2,standalone
 ```
 
