@@ -1,3 +1,7 @@
+<a class="bmc" href="https://buymeacoffee.com/jardimsonoro" rel="noopener">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="217" height="60" loading="lazy">
+</a>
+
 <p align="center"><img src="assets/icon-1024.png" width="160" alt="th0nk3000 icon"></p>
 
 # th0nk3000
