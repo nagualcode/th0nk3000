@@ -14,7 +14,9 @@ env:
 
 jobs:
   test-and-validate:
-    runs-on: macos-14
+    # Not a pinned macos-14: GitHub retired that label and the job was
+    # cancelled a second after starting, with no steps run and no error.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 

@@ -39,9 +39,12 @@ permissions:
 jobs:
   macos:
     name: macOS (Apple Silicon)
-    # macos-14 and later are arm64 runners, so --host-only yields an
-    # Apple Silicon build. Intel Macs build from source (see README).
-    runs-on: macos-14
+    # Every current macos-* label is arm64 (macos-13 was the last Intel
+    # default), so --host-only yields an Apple Silicon build. Pinning an
+    # exact version here is a trap: GitHub retires the old labels and the
+    # job then gets cancelled a second after it starts, with no steps run
+    # and no error. Intel Macs build from source (see README).
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +52,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-macos-14
+          key: release-macos-latest
           cache-bin: false
 
       - name: Version from Cargo.toml
@@ -172,7 +175,18 @@ jobs:
       run:
         shell: bash
     steps:
+      # Sparse checkout, not a full one: the repo carries
+      # `reverse_engineering/thOnk_0+2 ReadMe:Manual.txt` (a Mac OS 9
+      # filename - `:` was the path separator there), and `:` is illegal
+      # in an NTFS path, so a full checkout dies with `error: invalid
+      # path` before any build step runs. Cone mode gives us every
+      # root-level file (Cargo.toml, Cargo.lock, truce.toml) plus the
+      # directories listed here, and skips that one.
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            src
+            assets
 
       - uses: dtolnay/rust-toolchain@stable
 
